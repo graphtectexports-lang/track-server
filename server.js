@@ -8,16 +8,20 @@ const nodemailer = require("nodemailer");
 const fs = require("fs");
 const path = require("path");
 const { google } = require("googleapis");
-const keys = require("./smtp-sheets-tracker-3504935cb6f9.json");
 
-// ✅ STEP 3: Google Sheets Setup
-const auth = new google.auth.GoogleAuth({
-  credentials: keys,
-  scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-});
+// ✅ STEP 3: Google Sheets Setup (ENV – no JSON file)
+function sheetsClient() {
+  const key = (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
+  const auth = new google.auth.JWT({
+    email: process.env.GOOGLE_CLIENT_EMAIL,
+    key,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  });
+  return google.sheets({ version: "v4", auth });
+}
 
-const SPREADSHEET_ID = "1jrSeqCGiu44AiIq2WP1a00ly8au0kZp5wxsBLV60OvI";
-const RANGE = "VOLZA 6K FREE!A2:H"; // Columns: Email, Company, Name, STATUS, Open Date, Sent Date, Bounce Reason, Send ID
+const SPREADSHEET_ID = process.env.SHEETS_SPREADSHEET_ID;
+const RANGE = `${process.env.SHEET_NAME || "VOLZA 6K FREE"}!A2:H`;
 
 // ✅ STEP 4: Limits
 const MAX_SEND_PER_DAY = 10;
@@ -50,8 +54,8 @@ let transporter = nodemailer.createTransport({
 
 // ✅ STEP 8: Main Function
 (async () => {
-  const client = await auth.getClient();
-  const sheets = google.sheets({ version: "v4", auth: client });
+ const sheets = sheetsClient();
+
 
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
@@ -130,3 +134,4 @@ await sheets.spreadsheets.values.batchUpdate({
 
   console.log("✅ All done.");
 })();
+
