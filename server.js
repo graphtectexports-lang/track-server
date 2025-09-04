@@ -26,7 +26,11 @@ const SMTP_PASS = process.env.SMTP_PASS || "";
 function sheetsClient() {
   const email = process.env.GOOGLE_SERVICE_EMAIL || process.env.GOOGLE_CLIENT_EMAIL;
   if (!email) throw new Error("Missing GOOGLE_SERVICE_EMAIL or GOOGLE_CLIENT_EMAIL");
-  const key = (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
+
+  let key = process.env.GOOGLE_PRIVATE_KEY || "";
+  if (key.includes("\\n")) key = key.replace(/\\n/g, "\n"); // convert \n into real newlines
+  key = key.replace(/\r/g, ""); // strip CRs (Windows)
+
   if (!key) throw new Error("Missing GOOGLE_PRIVATE_KEY");
 
   const auth = new google.auth.JWT({
@@ -36,6 +40,7 @@ function sheetsClient() {
   });
   return google.sheets({ version: "v4", auth });
 }
+
 
 // 4) Health
 app.get("/", (_req, res) => res.type("text/plain").send("OK"));
@@ -146,3 +151,4 @@ app.post("/send-batch", async (req, res) => {
 
 // 7) Start server
 app.listen(PORT, () => console.log(`Server listening on ${PORT}`));
+
