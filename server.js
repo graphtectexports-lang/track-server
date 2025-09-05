@@ -4,11 +4,12 @@
 const express = require("express");
 const path = require("path");
 const fs = require("fs");
-const { google } = require("googleapis");
+const { sheetsClient } = require("./auth");
 const nodemailer = require("nodemailer");
 
 const app = express();
 app.use(express.json());
+app.use(require("./track"));
 
 // 2) Config from ENV
 const PORT = process.env.PORT || 10000;
@@ -45,43 +46,7 @@ function sheetsClient() {
 // 4) Health
 app.get("/", (_req, res) => res.type("text/plain").send("OK"));
 
-// 5) 1×1 pixel endpoint for opens: /px?email=..&id=..
-app.get("/px", async (req, res) => {
-  try {
-    const { email = "", id = "" } = req.query;
-    if (!email) {
-      // still return a pixel, just don't write
-      return sendPixel(res);
-    }
 
-    const sheets = sheetsClient();
-    const now = new Date().toLocaleString("en-GB", { timeZone: "Asia/Karachi" });
-
-    // Append an "Opened" row (Email, Company, Name, STATUS, Open Date, Sent Date, Bounce, Send ID)
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: SPREADSHEET_ID,
-      range: `${SHEET_NAME}!A:H`,
-      valueInputOption: "RAW",
-      requestBody: {
-        values: [[email, "", "", "Opened", now, "", "", id]],
-      },
-    });
-  } catch (e) {
-    console.error("PX error:", e.message);
-    // still serve pixel
-  }
-  return sendPixel(res);
-});
-
-function sendPixel(res) {
-  const buf = Buffer.from(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO2rYvEAAAAASUVORK5CYII=",
-    "base64"
-  );
-  res.set("Content-Type", "image/png");
-  res.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
-  return res.status(200).send(buf);
-}
 
 // 6) OPTIONAL: batch sender via HTTP (POST /send-batch)
 // Reads the sheet and sends up to MAX_PER request body (or default 10)
@@ -151,4 +116,5 @@ app.post("/send-batch", async (req, res) => {
 
 // 7) Start server
 app.listen(PORT, () => console.log(`Server listening on ${PORT}`));
+
 
