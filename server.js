@@ -4,11 +4,13 @@
 const express = require("express");
 const path = require("path");
 const fs = require("fs");
-const { sheetsClient } = require("./auth");
 const nodemailer = require("nodemailer");
+const { sheetsClient } = require("./auth");   // ✅ use the helper (no local function)
 
 const app = express();
 app.use(express.json());
+
+// Mount the /px router from track.js
 app.use(require("./track"));
 
 // 2) Config from ENV
@@ -23,33 +25,11 @@ const SMTP_SECURE = String(process.env.SMTP_SECURE || "false") === "true";
 const SMTP_USER = process.env.SMTP_USER || "export@graphtectsports.com.pk";
 const SMTP_PASS = process.env.SMTP_PASS || "";
 
-// 3) Google Sheets client from ENV (no JSON file on disk)
-function sheetsClient() {
-  const email = process.env.GOOGLE_SERVICE_EMAIL || process.env.GOOGLE_CLIENT_EMAIL;
-  if (!email) throw new Error("Missing GOOGLE_SERVICE_EMAIL or GOOGLE_CLIENT_EMAIL");
-
-  let key = process.env.GOOGLE_PRIVATE_KEY || "";
-  if (key.includes("\\n")) key = key.replace(/\\n/g, "\n"); // convert \n into real newlines
-  key = key.replace(/\r/g, ""); // strip CRs (Windows)
-
-  if (!key) throw new Error("Missing GOOGLE_PRIVATE_KEY");
-
-  const auth = new google.auth.JWT({
-    email,
-    key,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-  });
-  return google.sheets({ version: "v4", auth });
-}
-
-
-// 4) Health
+// 3) Health
 app.get("/", (_req, res) => res.type("text/plain").send("OK"));
 
-
-
-// 6) OPTIONAL: batch sender via HTTP (POST /send-batch)
-// Reads the sheet and sends up to MAX_PER request body (or default 10)
+// 4) OPTIONAL: batch sender via HTTP (POST /send-batch)
+// Reads the sheet and sends up to MAX_SEND per call (default 10)
 app.post("/send-batch", async (req, res) => {
   try {
     const MAX_SEND = Number(process.env.MAX_SEND_PER_DAY || 10);
@@ -104,6 +84,7 @@ app.post("/send-batch", async (req, res) => {
         },
       });
 
+      // spacing between sends
       await new Promise(r => setTimeout(r, DELAY_MS));
     }
 
@@ -114,7 +95,5 @@ app.post("/send-batch", async (req, res) => {
   }
 });
 
-// 7) Start server
+// 5) Start server
 app.listen(PORT, () => console.log(`Server listening on ${PORT}`));
-
-
