@@ -1,23 +1,38 @@
-// auth.js - Google Sheets authentication helper
-
+// auth.js
 const { google } = require("googleapis");
-const fs = require("fs");
 
-// If you are using Render secret file (/etc/secrets/sa.json)
+// Option A: from Render Secret file
+let sa = null;
+try {
+  sa = require("/etc/secrets/sa.json");
+} catch {
+  sa = null;
+}
+
 function sheetsClient() {
-  let creds;
-  try {
-    creds = JSON.parse(fs.readFileSync("/etc/secrets/sa.json", "utf-8"));
-  } catch (e) {
-    throw new Error("❌ Could not read service account file: " + e.message);
+  // Prefer Secret JSON if present; else fall back to env
+  const email =
+    (sa && sa.client_email) ||
+    process.env.GOOGLE_SERVICE_EMAIL ||
+    process.env.GOOGLE_CLIENT_EMAIL;
+
+  let key =
+    (sa && sa.private_key) ||
+    (process.env.GOOGLE_PRIVATE_KEY || "");
+
+  if (!email || !key) {
+    throw new Error("Google service account creds missing (email/key).");
   }
 
+  // normalise newlines
+  if (typeof key === "string" && key.includes("\\n")) key = key.replace(/\\n/g, "\n");
+  key = key.replace(/\r/g, "");
+
   const auth = new google.auth.JWT({
-    email: creds.client_email,
-    key: creds.private_key.replace(/\\n/g, "\n").replace(/\r/g, ""),
+    email,
+    key,
     scopes: ["https://www.googleapis.com/auth/spreadsheets"],
   });
-
   return google.sheets({ version: "v4", auth });
 }
 
