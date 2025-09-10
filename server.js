@@ -124,6 +124,35 @@ async function markStatus(email, status, reason = '') {
   }
 }
 
+// protect /send-from-sheet with the same token
+app.use('/send-from-sheet', (req, res, next) => {
+  const BATCH_TOKEN = process.env.BATCH_TOKEN;
+  if (!BATCH_TOKEN) return next(); // open if not configured
+  const auth = req.headers.authorization || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : auth;
+  if (token === BATCH_TOKEN) return next();
+  return res.status(401).json({ ok: false, error: 'unauthorized' });
+});
+
+/* ---------- PREVIEW (no send): which rows would be sent ---------- */
+// GET /sheet-preview?startRow=2&maxRows=200&onlyIfStatusIn=,Failed
+app.get('/sheet-preview', async (req, res) => {
+  try {
+    const startRow = Number(req.query.startRow || 2);
+    const maxRows  = Number(req.query.maxRows  || 50);
+    const onlyIfStatusIn =
+      (req.query.onlyIfStatusIn ?? ',') // default: "",Failed
+        .split(',')
+        .map(s => s.trim());
+
+    const recipients = await buildRecipientsFromSheet({ onlyIfStatusIn, startRow, maxRows });
+    res.json({ ok: true, count: recipients.length, sample: recipients.slice(0, 10) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+
 /* ------------------------ Helpers ------------------------ */
 app.use(express.json());
 
@@ -269,4 +298,5 @@ app.post('/send-batch', async (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log('Server running on', PORT);
 });
+
 
