@@ -82,6 +82,45 @@ async function markStatus(email, status, reason = '') {
   }
 }
 
+// Mark an email as "Opened" and log the Open Date (E)
+async function markOpen(email, campaignId = '') {
+  try {
+    const sheets = await getSheetsClient();
+    const row = await findRowByEmail(sheets, email);
+    if (row === -1) return;
+
+    // Get current values for that row (D-G)
+    const get = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: `${TAB_NAME}!D${row}:G${row}`
+    });
+    const vals = get.data.values?.[0] || [];
+    const currentStatus = (vals[0] || '').trim(); // D
+    const openDate      = (vals[1] || '').trim(); // E
+    const sentDate      = vals[2] || '';          // F
+    const bounceReason  = vals[3] || '';          // G
+
+    const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Karachi' });
+
+    // Update status + open date only if not already set
+    const nextStatus = currentStatus === 'Sent' || currentStatus === '' ? 'Opened' : currentStatus;
+    const newOpen    = openDate || now;
+
+    // Tag in Bounce Reason column for traceability
+    const tag = campaignId ? ` (id:${campaignId})` : '';
+    const reasonOut = openDate ? bounceReason : `${bounceReason}${bounceReason ? '; ' : ''}Opened${tag}`;
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `${TAB_NAME}!D${row}:G${row}`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [[nextStatus, newOpen, sentDate, reasonOut]] }
+    });
+  } catch (e) {
+    console.log('Sheets markOpen error for', email, String(e));
+  }
+}
+
 // Read rows starting at a given row (A..G) and return objects with row number
 async function getSheetRows(startRow = 2, endCol = 'G') {
   const sheets = await getSheetsClient();
@@ -344,3 +383,4 @@ app.post('/send-from-sheet', async (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log('Server running on', PORT);
 });
+
