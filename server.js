@@ -1,122 +1,69 @@
-// server.js — HTTP server for tracking + optional sending
-
-// 1) Basics
-const express = require("express");
-const path = require("path");
-const fs = require("fs");
-const nodemailer = require("nodemailer");
-const { sheetsClient } = require("./auth");   // ✅ use the helper (no local function)
+const express = require('express');
+const nodemailer = require('nodemailer');
 
 const app = express();
-app.use(express.json());
+const PORT = process.env.PORT || 3000;
 
-// Mount the /px router from track.js
-app.use(require("./track"));
+// --- SMTP transporter ---
+const smtpPort   = Number(process.env.SMTP_PORT || 587);
+const smtpSecure = /^(true|1|yes)$/i.test(process.env.SMTP_SECURE || "false");
 
-// 2) Config from ENV
-const PORT = process.env.PORT || 10000;
-const SHEET_NAME = process.env.SHEET_NAME || "VOLZA 6K FREE";
-const SPREADSHEET_ID = process.env.SHEETS_SPREADSHEET_ID;
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST,          // smtp.hostinger.com
+  port: smtpPort,                       // 465 or 587
+  secure: smtpSecure,                   // true for 465, false for 587
+  requireTLS: !smtpSecure,              // force STARTTLS if on 587
+  authMethod: 'LOGIN',
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+  },
+  tls: {
+    minVersion: 'TLSv1.2',
+    rejectUnauthorized: true,
+  },
+  logger: true,
+  debug: true,
+});
 
-// Mail (optional: only needed for /send-batch)
-const SMTP_HOST = process.env.SMTP_HOST || "smtp.hostinger.com";
-const SMTP_PORT = +(process.env.SMTP_PORT || 587);
-const SMTP_SECURE = String(process.env.SMTP_SECURE || "false") === "true";
-const SMTP_USER = process.env.SMTP_USER || "export@graphtectsports.com.pk";
-const SMTP_PASS = process.env.SMTP_PASS || "";
+// --- test routes ---
+app.get('/env-check', (req, res) => {
+  const mask = (s) => (s ? s.replace(/.(?=.{3})/g, '*') : null);
+  const pass = process.env.SMTP_PASS || '';
+  res.json({
+    SMTP_HOST: process.env.SMTP_HOST || null,
+    SMTP_PORT: smtpPort,
+    SMTP_SECURE_RAW: process.env.SMTP_SECURE || null,
+    SMTP_SECURE_BOOL: smtpSecure,
+    SMTP_USER: mask(process.env.SMTP_USER || null),
+    SMTP_PASS_SET: !!pass,
+    SMTP_PASS_LEN: pass.length,
+  });
+});
 
-// 3) Health
-app.get("/", (_req, res) => res.type("text/plain").send("OK"));
-
-// 4) OPTIONAL: batch sender via HTTP (POST /send-batch)
-// Reads the sheet and sends up to MAX_SEND per call (default 10)
-app.post("/send-batch", async (req, res) => {
+app.get('/smtp-check', async (req, res) => {
   try {
-    const MAX_SEND = Number(process.env.MAX_SEND_PER_DAY || 10);
-    const DELAY_MS = Number(process.env.SEND_DELAY_MS || 30000);
-
-    const transporter = nodemailer.createTransport({
-      host: SMTP_HOST,
-      port: SMTP_PORT,
-      secure: SMTP_SECURE,
-      auth: { user: SMTP_USER, pass: SMTP_PASS },
-    });
-
-    const htmlTemplate = fs.readFileSync(path.join(__dirname, "email-template.html"), "utf-8");
-    const sheets = sheetsClient();
-
-    const range = `${SHEET_NAME}!A2:H`;
-    const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range });
-    const rows = resp.data.values || [];
-
-    const queue = rows
-      .filter(r => r[0] && r[3] !== "Sent")
-      .slice(0, MAX_SEND)
-      .map(r => ({ email: r[0], name: r[2] || "Customer" }));
-
-    for (const person of queue) {
-      const customizedHtml = htmlTemplate
-        .replace(/{{\s*first_name\s*}}/gi, person.name)
-        .replace(/{{\s*email\s*}}/gi, person.email);
-
-      await transporter.sendMail({
-        from: `"Graphtect Sports" <${SMTP_USER}>`,
-        to: person.email,
-        replyTo: SMTP_USER,
-        subject: `New Product Catalogue Just For You, ${person.name}!`,
-        text: `Hello ${person.name},\n\nCheck out our new product catalogue here: https://graphtectsports.com.pk/product-catalogue-pdf/`,
-        html: customizedHtml,
-        headers: { "X-Campaign-Name": "Product-Catalogue-Launch" },
-        messageId: `<graphtect-${person.email.replace(/[^a-z0-9]/gi, "")}@graphtectsports.com.pk>`,
-      });
-
-      const rowIndex = rows.findIndex(r => r[0] === person.email) + 2;
-      const sentDate = new Date().toLocaleString("en-GB", { timeZone: "Asia/Karachi" });
-
-      await sheets.spreadsheets.values.batchUpdate({
-        spreadsheetId: SPREADSHEET_ID,
-        requestBody: {
-          data: [
-            { range: `${SHEET_NAME}!D${rowIndex}`, values: [["Sent"]] },
-            { range: `${SHEET_NAME}!F${rowIndex}`, values: [[sentDate]] },
-          ],
-          valueInputOption: "RAW",
-        },
-      });
-
-      // spacing between sends
-      await new Promise(r => setTimeout(r, DELAY_MS));
-    }
-
-    return res.json({ ok: true, sent: queue.length });
+    await transporter.verify();
+    res.json({ ok: true });
   } catch (err) {
-    console.error("send-batch error:", err);
-    return res.status(500).json({ ok: false, error: err.message });
+    res.json({ ok: false, error: String(err) });
   }
 });
 
-// 5) Start server
-app.listen(PORT, () => console.log(`Server listening on ${PORT}`));
-
-// QUICK SMTP CHECK (no email is sent)
-app.get("/smtp-check", async (_req, res) => {
+app.get('/send-test', async (req, res) => {
   try {
-    const transporter = require("nodemailer").createTransport({
-      host: process.env.SMTP_HOST,
-      port: Number(process.env.SMTP_PORT || 587),
-      secure: String(process.env.SMTP_SECURE || "false") === "true",
-      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-      logger: true,      // <-- print protocol logs to console
-      debug: true,       // <-- more verbose
+    const info = await transporter.sendMail({
+      from: process.env.SMTP_USER,
+      to: process.env.SMTP_USER,
+      subject: 'SMTP Test Email',
+      text: 'Hello from Render (Nodemailer).',
     });
-
-    // This opens a connection and authenticates only
-    const ok = await transporter.verify();
-    return res.json({ ok });
+    res.json({ ok: true, info });
   } catch (err) {
-    console.error("smtp-check error:", err);
-    return res.status(500).json({ ok: false, error: String(err) });
+    res.json({ ok: false, error: String(err) });
   }
 });
 
-
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
