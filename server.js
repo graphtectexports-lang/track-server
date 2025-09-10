@@ -97,3 +97,26 @@ app.post("/send-batch", async (req, res) => {
 
 // 5) Start server
 app.listen(PORT, () => console.log(`Server listening on ${PORT}`));
+
+// QUICK SMTP CHECK (no email is sent)
+app.get("/smtp-check", async (_req, res) => {
+  try {
+    const transporter = require("nodemailer").createTransport({
+      host: process.env.SMTP_HOST,
+      port: Number(process.env.SMTP_PORT || 587),
+      secure: String(process.env.SMTP_SECURE || "false") === "true",
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+      logger: true,      // <-- print protocol logs to console
+      debug: true,       // <-- more verbose
+    });
+
+    // This opens a connection and authenticates only
+    const ok = await transporter.verify();
+    return res.json({ ok });
+  } catch (err) {
+    console.error("smtp-check error:", err);
+    return res.status(500).json({ ok: false, error: String(err) });
+  }
+});
+
+
