@@ -39,6 +39,52 @@ const KEYFILE = process.env.GOOGLE_APPLICATION_CREDENTIALS || 'smtp-sheets-track
 // Your Sheet ID + Tab
 const SHEET_ID = '1jrSeqCGiu44AiIq2WP1a00ly8au0kZp5wxsBLV60OvI';
 const TAB_NAME = 'VOLZA 6K FREE';
+// --- Helpers to read rows and build recipients from the sheet ---
+
+// Read rows starting at a given row (A..G) and return objects with row number
+async function getSheetRows(startRow = 2, endCol = 'G') {
+  const sheets = await getSheetsClient();
+  const range = `${TAB_NAME}!A${startRow}:${endCol}`;
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range
+  });
+
+  // rows: [Email, Company, Name, STATUS, OpenDate, SentDate, Bounce]
+  const rows = resp.data.values || [];
+  return rows.map((r, i) => ({
+    __row: startRow + i,                     // actual sheet row number
+    email: (r[0] || '').trim(),
+    company: r[1] || '',
+    name: r[2] || '',
+    status: (r[3] || '').trim(),
+    openDate: r[4] || '',
+    sentDate: r[5] || '',
+    bounce: r[6] || ''
+  }));
+}
+
+// Build recipients list filtered by STATUS and limited in size
+async function buildRecipientsFromSheet({
+  onlyIfStatusIn = ['', 'Failed'],          // send to blank/Failed by default
+  startRow = 2,                             // start after header
+  maxRows = 200
+} = {}) {
+  const rows = await getSheetRows(startRow);
+  const filtered = rows
+    .filter(r => r.email)                   // must have an email
+    .filter(r => onlyIfStatusIn.includes(r.status));
+
+  const limited = filtered.slice(0, maxRows);
+
+  // Map to shape used by sendOne (also keep name/company for templating)
+  return limited.map(r => ({
+    email: r.email,
+    name: r.name || r.company || r.email.split('@')[0],
+    company: r.company,
+    __row: r.__row
+  }));
+}
 
 async function getSheetsClient() {
   const auth = new google.auth.GoogleAuth({
@@ -223,3 +269,4 @@ app.post('/send-batch', async (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log('Server running on', PORT);
 });
+
