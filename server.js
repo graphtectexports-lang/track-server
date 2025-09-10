@@ -115,6 +115,18 @@ async function sendOne({ from, replyTo, subject, html, text }, recipient, maxRet
   return { to, ok: false, error: lastErr || 'send_failed' };
 }
 
+// ---- simple bearer token guard for /send-batch ----
+const BATCH_TOKEN = process.env.BATCH_TOKEN; // set this in Render
+
+app.use('/send-batch', (req, res, next) => {
+  if (!BATCH_TOKEN) return next(); // if not set, route stays open
+  const auth = req.headers.authorization || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : auth;
+  if (token === BATCH_TOKEN) return next();
+  return res.status(401).json({ ok: false, error: 'unauthorized' });
+});
+
+
 app.post('/send-batch', async (req, res) => {
   try {
     const {
@@ -153,3 +165,4 @@ app.post('/send-batch', async (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log('Server running on', PORT);
 });
+
