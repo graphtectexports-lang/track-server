@@ -29,6 +29,50 @@ const transporter = nodemailer.createTransport({
   debug: true,
 });
 
+// ---- Google Sheets integration ----
+const { google } = require('googleapis');
+const fs = require('fs');
+
+async function getSheetsClient() {
+  const auth = new google.auth.GoogleAuth({
+    keyFile: 'smtp-sheets-tracker-3504935cb6f9.json', // path to your creds
+    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+  });
+  return google.sheets({ version: 'v4', auth });
+}
+
+// Your Sheet ID (from URL)
+const SHEET_ID = 'YOUR_SHEET_ID_HERE';
+const TAB_NAME = 'VOLZA 6K FREE';
+
+// Update one row by email
+async function markStatus(email, status, reason = '') {
+  const sheets = await getSheetsClient();
+
+  // Read emails in column A
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: `${TAB_NAME}!A2:A`,
+  });
+
+  const rows = resp.data.values || [];
+  const idx = rows.findIndex(r => r[0] && r[0].toLowerCase() === email.toLowerCase());
+  if (idx === -1) return; // not found
+
+  const row = idx + 2; // header offset
+  const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Karachi' });
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SHEET_ID,
+    range: `${TAB_NAME}!D${row}:G${row}`,
+    valueInputOption: 'RAW',
+    requestBody: {
+      values: [[status, '', now, reason]], // STATUS, Open Date(blank), Sent Date, Bounce
+    },
+  });
+}
+
+
 // --- Utilities ---
 app.use(express.json());
 
@@ -165,4 +209,5 @@ app.post('/send-batch', async (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log('Server running on', PORT);
 });
+
 
