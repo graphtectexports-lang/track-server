@@ -1,53 +1,79 @@
 // server.js
+// Graphtect SMTP + Sheets sender (full, final)
+
 const express = require('express');
 const nodemailer = require('nodemailer');
 const { google } = require('googleapis');
+const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Parse JSON for all routes
-app.use(express.json());
+/* ------------------------------------------------------------------ */
+/* Boot & health                                                      */
+/* ------------------------------------------------------------------ */
 
-/* ------------------------------------------------------------------ */
-/*                       Basic health routes                          */
-/* ------------------------------------------------------------------ */
+app.use(express.json());
 app.get('/', (_, res) => res.send('OK'));
 app.get('/healthz', (_, res) => res.json({ ok: true }));
 
 /* ------------------------------------------------------------------ */
-/*                         Nodemailer setup                            */
+/* Nodemailer (Hostinger)                                             */
 /* ------------------------------------------------------------------ */
-const toBool = v => /^(true|1|yes)$/i.test(String(v || ''));
-const smtpPort   = Number(process.env.SMTP_PORT || 587);
+
+const toBool = (v) => /^(true|1|yes)$/i.test(String(v || ''));
+const smtpPort = Number(process.env.SMTP_PORT || 587);
 const smtpSecure = toBool(process.env.SMTP_SECURE || 'false');
 const SMTP_AUTH_METHOD = (process.env.SMTP_AUTH_METHOD || 'LOGIN').toUpperCase();
 
 const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,             // e.g., smtp.hostinger.com
-  port: smtpPort,                          // 465 or 587
-  secure: smtpSecure,                      // true for 465, false for 587
-  requireTLS: !smtpSecure,                 // STARTTLS when on 587
-  authMethod: SMTP_AUTH_METHOD,            // LOGIN or PLAIN
+  host: process.env.SMTP_HOST,          // smtp.hostinger.com
+  port: smtpPort,                       // 465 or 587
+  secure: smtpSecure,                   // true for 465, false for 587 (STARTTLS)
+  requireTLS: !smtpSecure,              // force STARTTLS on 587
+  authMethod: SMTP_AUTH_METHOD,         // LOGIN or PLAIN
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
   },
   tls: { minVersion: 'TLSv1.2', rejectUnauthorized: true },
-  logger: true,                            // turn off later in prod
+  logger: true,                         // turn off later if noisy
   debug: true,
 });
 
 /* ------------------------------------------------------------------ */
-/*                        Google Sheets setup                          */
+/* Template handling                                                  */
 /* ------------------------------------------------------------------ */
-// Put service-account JSON in Render "Secret Files" (e.g., sa.json)
-// and set GOOGLE_APPLICATION_CREDENTIALS=sa.json in Environment.
-const KEYFILE = process.env.GOOGLE_APPLICATION_CREDENTIALS || 'smtp-sheets-tracker-3504935cb6f9.json';
 
-// Your Sheet ID + Tab
+const TEMPLATE_FILE = process.env.EMAIL_TEMPLATE_FILE || 'email-template.html';
+const SUBJECT_TEMPLATE = process.env.EMAIL_SUBJECT || 'Graphtect Catalogue 2025';
+
+let TEMPLATE_CACHE = null;
+function loadTemplateFile() {
+  try {
+    TEMPLATE_CACHE = fs.readFileSync(TEMPLATE_FILE, 'utf8');
+    return TEMPLATE_CACHE;
+  } catch (e) {
+    console.log('TEMPLATE load error:', e.message);
+    return TEMPLATE_CACHE || '<p>Hello {{name}},</p>';
+  }
+}
+
+function renderTemplate(str, data = {}) {
+  if (!str) return '';
+  return str.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_, k) =>
+    (data[k] !== undefined && data[k] !== null) ? String(data[k]) : ''
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Google Sheets setup                                                */
+/* ------------------------------------------------------------------ */
+
+// If you use a Secret File in Render, set GOOGLE_APPLICATION_CREDENTIALS to that filename (e.g., "sa.json")
+const KEYFILE = process.env.GOOGLE_APPLICATION_CREDENTIALS || 'smtp-sheets-tracker-3504935cb6f9.json';
 const SHEET_ID = '1jrSeqCGiu44AiIq2WP1a00ly8au0kZp5wxsBLV60OvI';
-const TAB_NAME = 'VOLZA 6K FREE';
+const TAB_NAME = 'VOLZA 6K FREE'; // match your tab name exactly
 
 async function getSheetsClient() {
   const auth = new google.auth.GoogleAuth({
@@ -57,7 +83,6 @@ async function getSheetsClient() {
   return google.sheets({ version: 'v4', auth });
 }
 
-// Find row by email (column A)
 async function findRowByEmail(sheets, email) {
   const resp = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
@@ -65,18 +90,17 @@ async function findRowByEmail(sheets, email) {
   });
   const rows = resp.data.values || [];
   const idx = rows.findIndex(r => (r[0] || '').toLowerCase().trim() === email.toLowerCase().trim());
-  return idx >= 0 ? idx + 2 : -1; // +2 for header offset
+  return idx >= 0 ? idx + 2 : -1; // +2 for header
 }
 
-// Update STATUS / Sent Date / Bounce Reason for one email
+// STATUS (D), Open Date (E), Sent Date (F), Bounce Reason (G)
 async function markStatus(email, status, reason = '') {
   try {
     const sheets = await getSheetsClient();
     const row = await findRowByEmail(sheets, email);
-    if (row === -1) return; // email not found; skip silently
+    if (row === -1) return;
 
     const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Karachi' });
-    // Columns: D=STATUS, E=Open Date, F=Sent Date, G=Bounce Reason
     await sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
       range: `${TAB_NAME}!D${row}:G${row}`,
@@ -88,30 +112,27 @@ async function markStatus(email, status, reason = '') {
   }
 }
 
-// Mark "Opened" and log Open Date (E) once; keep Sent Date (F)
+// When pixel fires you could call this (hook from px route if you have one)
 async function markOpen(email, campaignId = '') {
   try {
     const sheets = await getSheetsClient();
     const row = await findRowByEmail(sheets, email);
     if (row === -1) return;
 
-    // Read current D..G
     const get = await sheets.spreadsheets.values.get({
       spreadsheetId: SHEET_ID,
       range: `${TAB_NAME}!D${row}:G${row}`
     });
     const vals = get.data.values?.[0] || [];
-    const currentStatus = (vals[0] || '').trim(); // D
-    const openDate      = (vals[1] || '').trim(); // E
-    const sentDate      = vals[2] || '';          // F
-    const bounceReason  = vals[3] || '';          // G
+    const currentStatus = (vals[0] || '').trim();
+    const openDate      = (vals[1] || '').trim();
+    const sentDate      = vals[2] || '';
+    const bounceReason  = vals[3] || '';
 
     const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Karachi' });
+    const nextStatus = (currentStatus === 'Sent' || currentStatus === '') ? 'Opened' : currentStatus;
+    const newOpen = openDate || now;
 
-    const nextStatus = currentStatus === '' || currentStatus === 'Sent' ? 'Opened' : currentStatus;
-    const newOpen    = openDate || now;
-
-    // Tag "Opened" once into G for traceability
     const tag = campaignId ? ` (id:${campaignId})` : '';
     const reasonOut = openDate ? bounceReason : `${bounceReason}${bounceReason ? '; ' : ''}Opened${tag}`;
 
@@ -126,16 +147,15 @@ async function markOpen(email, campaignId = '') {
   }
 }
 
-// Read rows starting at a given row (A..G) and return objects with row number
 async function getSheetRows(startRow = 2, endCol = 'G') {
   const sheets = await getSheetsClient();
-  const range = `${TAB_NAME}!A${startRow}:${endCol}`;
-  const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range });
-
-  // rows: [Email, Company, Name, STATUS, OpenDate, SentDate, Bounce]
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: `${TAB_NAME}!A${startRow}:${endCol}`,
+  });
   const rows = resp.data.values || [];
   return rows.map((r, i) => ({
-    __row: startRow + i,                     // actual sheet row number
+    __row: startRow + i,
     email: (r[0] || '').trim(),
     company: r[1] || '',
     name: r[2] || '',
@@ -146,21 +166,16 @@ async function getSheetRows(startRow = 2, endCol = 'G') {
   }));
 }
 
-// Build recipients list filtered by STATUS and limited in size
 async function buildRecipientsFromSheet({
-  onlyIfStatusIn = ['', 'Failed'],          // send to blank/Failed by default
-  startRow = 2,                             // start after header
+  onlyIfStatusIn = ['', 'Failed'],
+  startRow = 2,
   maxRows = 200
 } = {}) {
   const rows = await getSheetRows(startRow);
   const filtered = rows
-    .filter(r => r.email)                   // must have an email
+    .filter(r => r.email)
     .filter(r => onlyIfStatusIn.includes(r.status));
-
-  const limited = filtered.slice(0, maxRows);
-
-  // Map to shape used by sendOne (also keep name/company for templating)
-  return limited.map(r => ({
+  return filtered.slice(0, maxRows).map(r => ({
     email: r.email,
     name: r.name || r.company || r.email.split('@')[0],
     company: r.company,
@@ -169,20 +184,51 @@ async function buildRecipientsFromSheet({
 }
 
 /* ------------------------------------------------------------------ */
-/*                           Small helpers                             */
+/* Helpers                                                            */
 /* ------------------------------------------------------------------ */
+
 const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || '').trim());
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-function applyTemplate(str, data = {}) {
-  if (!str) return str;
-  return str.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_, k) =>
-    (data[k] !== undefined && data[k] !== null) ? String(data[k]) : ''
-  );
+
+async function sendOne({ from, replyTo, subject, html, text }, recipient, maxRetries, delayOnSuccessMs) {
+  const to = String(recipient.email || '').trim();
+  if (!isEmail(to)) return { to, ok: false, error: 'invalid_email' };
+
+  // Render subject + html with recipient fields
+  const subj = renderTemplate(subject, { ...recipient, email: to });
+  const htmlRendered = renderTemplate(html, { ...recipient, email: to });
+  const textRendered = text ? renderTemplate(text, { ...recipient, email: to }) : undefined;
+
+  const msg = {
+    from,
+    to,
+    subject: subj,
+    html: htmlRendered,
+    text: textRendered,
+    replyTo: replyTo || from,
+  };
+
+  let attempt = 0;
+  let lastErr = null;
+  while (attempt <= maxRetries) {
+    try {
+      const info = await transporter.sendMail(msg);
+      if (delayOnSuccessMs) await sleep(delayOnSuccessMs);
+      return { to, ok: true, messageId: info.messageId, response: info.response };
+    } catch (err) {
+      lastErr = String(err && err.message ? err.message : err);
+      attempt += 1;
+      if (attempt > maxRetries) break;
+      await sleep(800 * Math.pow(2, attempt - 1)); // 0.8s, 1.6s, 3.2s...
+    }
+  }
+  return { to, ok: false, error: lastErr || 'send_failed' };
 }
 
 /* ------------------------------------------------------------------ */
-/*                            Debug routes                             */
+/* Debug routes                                                       */
 /* ------------------------------------------------------------------ */
+
 app.get('/env-check', (req, res) => {
   const mask = s => (s ? s.replace(/.(?=.{3})/g, '*') : null);
   const pass = process.env.SMTP_PASS || '';
@@ -197,6 +243,7 @@ app.get('/env-check', (req, res) => {
     SHEET_ID,
     TAB_NAME,
     KEYFILE_IN_USE: KEYFILE,
+    TEMPLATE_FILE: TEMPLATE_FILE
   });
 });
 
@@ -224,82 +271,61 @@ app.get('/send-test', async (req, res) => {
 });
 
 /* ------------------------------------------------------------------ */
-/*                            Auth guards                              */
+/* Auth guards (Bearer)                                               */
 /* ------------------------------------------------------------------ */
-const BATCH_TOKEN = process.env.BATCH_TOKEN; // set in Render to protect sending routes
 
-function tokenGuard(req, res, next) {
-  if (!BATCH_TOKEN) return next(); // open if not configured
-  const auth = req.headers.authorization || '';
-  const token = auth.startsWith('Bearer ') ? auth.slice(7) : auth;
-  if (token === BATCH_TOKEN) return next();
-  return res.status(401).json({ ok: false, error: 'unauthorized' });
+const BATCH_TOKEN = process.env.BATCH_TOKEN;
+
+function guard(path) {
+  app.use(path, (req, res, next) => {
+    if (!BATCH_TOKEN) return next(); // open if not configured
+    const auth = req.headers.authorization || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7) : auth;
+    if (token === BATCH_TOKEN) return next();
+    return res.status(401).json({ ok: false, error: 'unauthorized' });
+  });
 }
 
-app.use('/send-batch', tokenGuard);
-app.use('/send-from-sheet', tokenGuard);
+guard('/send-batch');
+guard('/send-from-sheet');
+guard('/send-daily');
 
 /* ------------------------------------------------------------------ */
-/*                         Mail send helpers                           */
+/* Batch from manual list                                             */
 /* ------------------------------------------------------------------ */
-async function sendOne({ from, replyTo, subject, html, text }, recipient, maxRetries, delayOnSuccessMs) {
-  const to = String(recipient.email || '').trim();
-  if (!isEmail(to)) return { to, ok: false, error: 'invalid_email' };
 
-  const msg = {
-    from,
-    to,
-    subject: applyTemplate(subject, recipient),
-    html: applyTemplate(html, recipient),
-    text: applyTemplate(text, recipient),
-    replyTo: replyTo || from,
-  };
-
-  let attempt = 0;
-  let lastErr = null;
-  while (attempt <= maxRetries) {
-    try {
-      const info = await transporter.sendMail(msg);
-      if (delayOnSuccessMs) await sleep(delayOnSuccessMs);
-      return { to, ok: true, messageId: info.messageId, response: info.response };
-    } catch (err) {
-      lastErr = String(err && err.message ? err.message : err);
-      attempt += 1;
-      if (attempt > maxRetries) break;
-      await sleep(800 * Math.pow(2, attempt - 1)); // 0.8s, 1.6s, 3.2s...
-    }
-  }
-  return { to, ok: false, error: lastErr || 'send_failed' };
-}
-
-/* ------------------------------------------------------------------ */
-/*                     Batch route (manual list)                       */
-/* ------------------------------------------------------------------ */
 app.post('/send-batch', async (req, res) => {
   try {
     const {
       from = process.env.SMTP_USER,
       replyTo,
-      subject,
-      html,
-      text,
+      subject = SUBJECT_TEMPLATE,
+      html,                                // if not provided, will use file
+      text = '',
       recipients = [],
       batchDelayMs = 800,
       maxRetries = 2,
     } = req.body || {};
 
-    if (!subject) return res.status(400).json({ ok: false, error: 'missing_subject' });
-    if (!html && !text) return res.status(400).json({ ok: false, error: 'missing_body' });
+    if (!html && !fs.existsSync(TEMPLATE_FILE)) {
+      return res.status(400).json({ ok: false, error: 'missing_html_and_template_file' });
+    }
     if (!Array.isArray(recipients) || recipients.length === 0)
       return res.status(400).json({ ok: false, error: 'no_recipients' });
     if (String(from).trim().toLowerCase() !== String(process.env.SMTP_USER || '').trim().toLowerCase())
       return res.status(400).json({ ok: false, error: 'from_must_equal_smtp_user' });
 
+    const htmlSource = html || loadTemplateFile();
+
     const results = [];
     for (const r of recipients) {
-      const result = await sendOne({ from, replyTo, subject, html, text }, r, Number(maxRetries) || 0, Number(batchDelayMs) || 0);
+      const result = await sendOne(
+        { from, replyTo, subject, html: htmlSource, text },
+        r,
+        Number(maxRetries) || 0,
+        Number(batchDelayMs) || 0
+      );
 
-      // Update Sheet
       try {
         if (result.ok) await markStatus(result.to, 'Sent', '');
         else           await markStatus(result.to, 'Failed', result.error || '');
@@ -317,17 +343,17 @@ app.post('/send-batch', async (req, res) => {
 });
 
 /* ------------------------------------------------------------------ */
-/*                    Preview from Sheet (no send)                     */
+/* Preview from sheet                                                 */
 /* ------------------------------------------------------------------ */
+
 // GET /sheet-preview?startRow=2&maxRows=200&onlyIfStatusIn=,Failed
 app.get('/sheet-preview', async (req, res) => {
   try {
     const startRow = Number(req.query.startRow || 2);
     const maxRows  = Number(req.query.maxRows  || 50);
     const onlyIfStatusIn =
-      (req.query.onlyIfStatusIn ?? ',') // default: "",Failed
-        .split(',')
-        .map(s => s.trim());
+      (req.query.onlyIfStatusIn ?? ',').split(',').map(s => s.trim());
+
     const recipients = await buildRecipientsFromSheet({ onlyIfStatusIn, startRow, maxRows });
     res.json({ ok: true, count: recipients.length, sample: recipients.slice(0, 10) });
   } catch (e) {
@@ -336,44 +362,45 @@ app.get('/sheet-preview', async (req, res) => {
 });
 
 /* ------------------------------------------------------------------ */
-/*                      Send directly from Sheet                       */
+/* Send directly from sheet (manual trigger)                          */
 /* ------------------------------------------------------------------ */
-// POST /send-from-sheet   (Authorization: Bearer <BATCH_TOKEN>)
+
 app.post('/send-from-sheet', async (req, res) => {
   try {
     const {
       subject,
       html,
       text,
-      batchDelayMs   = 1200,            // pacing between sends
-      maxRetries     = 2,               // per-email retries
-      startRow       = 2,               // skip header
-      maxRows        = 200,             // how many rows to process
-      onlyIfStatusIn = ['', 'Failed'],  // blank or Failed by default
+      batchDelayMs   = 1200,
+      maxRetries     = 2,
+      startRow       = 2,
+      maxRows        = 200,
+      onlyIfStatusIn = ['', 'Failed'],
       from           = process.env.SMTP_USER,
       replyTo
     } = req.body || {};
 
-    if (!subject) return res.status(400).json({ ok: false, error: 'missing_subject' });
-    if (!html && !text) return res.status(400).json({ ok: false, error: 'missing_body' });
+    if (!subject && !SUBJECT_TEMPLATE) return res.status(400).json({ ok: false, error: 'missing_subject' });
+
+    const htmlSource   = html || loadTemplateFile();
+    const finalSubject = subject || SUBJECT_TEMPLATE;
+
+    if (!htmlSource) return res.status(500).json({ ok: false, error: 'template_missing' });
     if (String(from).trim().toLowerCase() !== String(process.env.SMTP_USER || '').trim().toLowerCase())
       return res.status(400).json({ ok: false, error: 'from_must_equal_smtp_user' });
 
-    // Pull recipients from the sheet
     const recipients = await buildRecipientsFromSheet({ onlyIfStatusIn, startRow, maxRows });
-    if (recipients.length === 0)
-      return res.json({ ok: true, sent: 0, total: 0, results: [] });
+    if (recipients.length === 0) return res.json({ ok: true, sent: 0, total: 0, results: [] });
 
     const results = [];
     for (const r of recipients) {
       const result = await sendOne(
-        { from, replyTo, subject, html, text },
+        { from, replyTo, subject: finalSubject, html: htmlSource, text },
         r,
         Number(maxRetries) || 0,
         Number(batchDelayMs) || 0
       );
 
-      // Update Sheet
       try {
         if (result.ok) await markStatus(result.to, 'Sent', '');
         else           await markStatus(result.to, 'Failed', result.error || '');
@@ -391,44 +418,56 @@ app.post('/send-from-sheet', async (req, res) => {
 });
 
 /* ------------------------------------------------------------------ */
-/*                       Tracking pixel endpoint                       */
+/* Daily automation endpoint (for Render Cron)                        */
 /* ------------------------------------------------------------------ */
-// 1×1 transparent GIF
-const PIXEL_GIF = Buffer.from(
-  'R0lGODlhAQABAPAAAP///wAAACH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==',
-  'base64'
-);
 
-// GET /px?email=someone@example.com&id=optional-tag
-app.get('/px', async (req, res) => {
+app.post('/send-daily', async (req, res) => {
   try {
-    const email = String(req.query.email || '').trim().toLowerCase();
-    const campaignId = String(req.query.id || '').trim();
+    const {
+      maxRows        = Number(process.env.DAILY_MAX_ROWS || 350),
+      batchDelayMs   = Number(process.env.DAILY_BATCH_DELAY_MS || 3000),
+      onlyIfStatusIn = ['', 'Failed'],
+      startRow       = 2,
+      from           = process.env.SMTP_USER,
+      replyTo        = process.env.SMTP_USER,
+      subject
+    } = req.body || {};
 
-    if (email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      // fire-and-forget so the pixel returns instantly
-      markOpen(email, campaignId).catch(err =>
-        console.log('markOpen async err:', String(err))
+    const htmlSource   = loadTemplateFile();
+    const finalSubject = subject || SUBJECT_TEMPLATE;
+
+    if (!htmlSource) return res.status(500).json({ ok: false, error: 'template_missing' });
+
+    const recipients = await buildRecipientsFromSheet({ onlyIfStatusIn, startRow, maxRows });
+    if (recipients.length === 0) return res.json({ ok: true, sent: 0, total: 0, results: [] });
+
+    const results = [];
+    for (const r of recipients) {
+      const result = await sendOne(
+        { from, replyTo, subject: finalSubject, html: htmlSource, text: '' },
+        r,
+        2,
+        batchDelayMs
       );
+      try {
+        if (result.ok) await markStatus(result.to, 'Sent', '');
+        else           await markStatus(result.to, 'Failed', result.error || '');
+      } catch (e) {
+        console.log('Sheets update error for', result.to, String(e));
+      }
+      results.push(result);
     }
 
-    // no-cache so first fetch registers
-    res.set({
-      'Content-Type': 'image/gif',
-      'Content-Length': PIXEL_GIF.length,
-      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
-      'Pragma': 'no-cache',
-      'Expires': '0',
-    });
-    res.status(200).end(PIXEL_GIF);
-  } catch {
-    res.set('Content-Type', 'image/gif').status(200).end(PIXEL_GIF);
+    res.json({ ok: true, sent: results.filter(x => x.ok).length, total: recipients.length, results });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
 /* ------------------------------------------------------------------ */
-/*                           Start server                              */
+/* Start                                                              */
 /* ------------------------------------------------------------------ */
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log('Server running on', PORT);
 });
