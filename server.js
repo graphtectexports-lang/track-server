@@ -9,11 +9,15 @@ const PORT = process.env.PORT || 3000;
 // Parse JSON for all routes
 app.use(express.json());
 
-/* ------------------------ Basic health routes ------------------------ */
+/* ------------------------------------------------------------------ */
+/*                       Basic health routes                          */
+/* ------------------------------------------------------------------ */
 app.get('/', (_, res) => res.send('OK'));
 app.get('/healthz', (_, res) => res.json({ ok: true }));
 
-/* ------------------------ Mail transporter --------------------------- */
+/* ------------------------------------------------------------------ */
+/*                         Nodemailer setup                            */
+/* ------------------------------------------------------------------ */
 const toBool = v => /^(true|1|yes)$/i.test(String(v || ''));
 const smtpPort   = Number(process.env.SMTP_PORT || 587);
 const smtpSecure = toBool(process.env.SMTP_SECURE || 'false');
@@ -34,14 +38,16 @@ const transporter = nodemailer.createTransport({
   debug: true,
 });
 
-/* ------------------------ Google Sheets setup ------------------------ */
-// Key file must exist in the container (repo file OR Render Secret File).
-// If you use a different filename, set GOOGLE_APPLICATION_CREDENTIALS to that path.
+/* ------------------------------------------------------------------ */
+/*                        Google Sheets setup                          */
+/* ------------------------------------------------------------------ */
+// Put service-account JSON in Render "Secret Files" (e.g., sa.json)
+// and set GOOGLE_APPLICATION_CREDENTIALS=sa.json in Environment.
 const KEYFILE = process.env.GOOGLE_APPLICATION_CREDENTIALS || 'smtp-sheets-tracker-3504935cb6f9.json';
 
 // Your Sheet ID + Tab
 const SHEET_ID = '1jrSeqCGiu44AiIq2WP1a00ly8au0kZp5wxsBLV60OvI';
-const TAB_NAME = 'VOLZA 6 K FREE'.replace(' 6 K ', ' 6K '); // normalize just in case
+const TAB_NAME = 'VOLZA 6K FREE';
 
 async function getSheetsClient() {
   const auth = new google.auth.GoogleAuth({
@@ -82,14 +88,14 @@ async function markStatus(email, status, reason = '') {
   }
 }
 
-// Mark an email as "Opened" and log the Open Date (E)
+// Mark "Opened" and log Open Date (E) once; keep Sent Date (F)
 async function markOpen(email, campaignId = '') {
   try {
     const sheets = await getSheetsClient();
     const row = await findRowByEmail(sheets, email);
     if (row === -1) return;
 
-    // Get current values for that row (D-G)
+    // Read current D..G
     const get = await sheets.spreadsheets.values.get({
       spreadsheetId: SHEET_ID,
       range: `${TAB_NAME}!D${row}:G${row}`
@@ -102,11 +108,10 @@ async function markOpen(email, campaignId = '') {
 
     const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Karachi' });
 
-    // Update status + open date only if not already set
-    const nextStatus = currentStatus === 'Sent' || currentStatus === '' ? 'Opened' : currentStatus;
+    const nextStatus = currentStatus === '' || currentStatus === 'Sent' ? 'Opened' : currentStatus;
     const newOpen    = openDate || now;
 
-    // Tag in Bounce Reason column for traceability
+    // Tag "Opened" once into G for traceability
     const tag = campaignId ? ` (id:${campaignId})` : '';
     const reasonOut = openDate ? bounceReason : `${bounceReason}${bounceReason ? '; ' : ''}Opened${tag}`;
 
@@ -125,10 +130,7 @@ async function markOpen(email, campaignId = '') {
 async function getSheetRows(startRow = 2, endCol = 'G') {
   const sheets = await getSheetsClient();
   const range = `${TAB_NAME}!A${startRow}:${endCol}`;
-  const resp = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range
-  });
+  const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range });
 
   // rows: [Email, Company, Name, STATUS, OpenDate, SentDate, Bounce]
   const rows = resp.data.values || [];
@@ -166,7 +168,9 @@ async function buildRecipientsFromSheet({
   }));
 }
 
-/* ------------------------ Small helpers ------------------------ */
+/* ------------------------------------------------------------------ */
+/*                           Small helpers                             */
+/* ------------------------------------------------------------------ */
 const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || '').trim());
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 function applyTemplate(str, data = {}) {
@@ -176,7 +180,9 @@ function applyTemplate(str, data = {}) {
   );
 }
 
-/* ------------------------ Debug routes ------------------------ */
+/* ------------------------------------------------------------------ */
+/*                            Debug routes                             */
+/* ------------------------------------------------------------------ */
 app.get('/env-check', (req, res) => {
   const mask = s => (s ? s.replace(/.(?=.{3})/g, '*') : null);
   const pass = process.env.SMTP_PASS || '';
@@ -217,26 +223,25 @@ app.get('/send-test', async (req, res) => {
   }
 });
 
-/* ------------------------ Token guards ------------------------ */
+/* ------------------------------------------------------------------ */
+/*                            Auth guards                              */
+/* ------------------------------------------------------------------ */
 const BATCH_TOKEN = process.env.BATCH_TOKEN; // set in Render to protect sending routes
 
-app.use('/send-batch', (req, res, next) => {
+function tokenGuard(req, res, next) {
   if (!BATCH_TOKEN) return next(); // open if not configured
   const auth = req.headers.authorization || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : auth;
   if (token === BATCH_TOKEN) return next();
   return res.status(401).json({ ok: false, error: 'unauthorized' });
-});
+}
 
-app.use('/send-from-sheet', (req, res, next) => {
-  if (!BATCH_TOKEN) return next(); // open if not configured
-  const auth = req.headers.authorization || '';
-  const token = auth.startsWith('Bearer ') ? auth.slice(7) : auth;
-  if (token === BATCH_TOKEN) return next();
-  return res.status(401).json({ ok: false, error: 'unauthorized' });
-});
+app.use('/send-batch', tokenGuard);
+app.use('/send-from-sheet', tokenGuard);
 
-/* ------------------------ Mail send helpers ------------------------ */
+/* ------------------------------------------------------------------ */
+/*                         Mail send helpers                           */
+/* ------------------------------------------------------------------ */
 async function sendOne({ from, replyTo, subject, html, text }, recipient, maxRetries, delayOnSuccessMs) {
   const to = String(recipient.email || '').trim();
   if (!isEmail(to)) return { to, ok: false, error: 'invalid_email' };
@@ -267,7 +272,9 @@ async function sendOne({ from, replyTo, subject, html, text }, recipient, maxRet
   return { to, ok: false, error: lastErr || 'send_failed' };
 }
 
-/* ------------------------ Batch route (manual list) ------------------------ */
+/* ------------------------------------------------------------------ */
+/*                     Batch route (manual list)                       */
+/* ------------------------------------------------------------------ */
 app.post('/send-batch', async (req, res) => {
   try {
     const {
@@ -309,7 +316,9 @@ app.post('/send-batch', async (req, res) => {
   }
 });
 
-/* ------------------------ Preview from Sheet (no send) --------------------- */
+/* ------------------------------------------------------------------ */
+/*                    Preview from Sheet (no send)                     */
+/* ------------------------------------------------------------------ */
 // GET /sheet-preview?startRow=2&maxRows=200&onlyIfStatusIn=,Failed
 app.get('/sheet-preview', async (req, res) => {
   try {
@@ -326,7 +335,9 @@ app.get('/sheet-preview', async (req, res) => {
   }
 });
 
-/* ------------------------ Send directly from Sheet ------------------------ */
+/* ------------------------------------------------------------------ */
+/*                      Send directly from Sheet                       */
+/* ------------------------------------------------------------------ */
 // POST /send-from-sheet   (Authorization: Bearer <BATCH_TOKEN>)
 app.post('/send-from-sheet', async (req, res) => {
   try {
@@ -379,8 +390,45 @@ app.post('/send-from-sheet', async (req, res) => {
   }
 });
 
-/* ------------------------ Start server ------------------------ */
+/* ------------------------------------------------------------------ */
+/*                       Tracking pixel endpoint                       */
+/* ------------------------------------------------------------------ */
+// 1×1 transparent GIF
+const PIXEL_GIF = Buffer.from(
+  'R0lGODlhAQABAPAAAP///wAAACH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==',
+  'base64'
+);
+
+// GET /px?email=someone@example.com&id=optional-tag
+app.get('/px', async (req, res) => {
+  try {
+    const email = String(req.query.email || '').trim().toLowerCase();
+    const campaignId = String(req.query.id || '').trim();
+
+    if (email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      // fire-and-forget so the pixel returns instantly
+      markOpen(email, campaignId).catch(err =>
+        console.log('markOpen async err:', String(err))
+      );
+    }
+
+    // no-cache so first fetch registers
+    res.set({
+      'Content-Type': 'image/gif',
+      'Content-Length': PIXEL_GIF.length,
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
+      'Pragma': 'no-cache',
+      'Expires': '0',
+    });
+    res.status(200).end(PIXEL_GIF);
+  } catch {
+    res.set('Content-Type', 'image/gif').status(200).end(PIXEL_GIF);
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/*                           Start server                              */
+/* ------------------------------------------------------------------ */
 app.listen(PORT, '0.0.0.0', () => {
   console.log('Server running on', PORT);
 });
-
