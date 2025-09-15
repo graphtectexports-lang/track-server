@@ -1,5 +1,5 @@
 // server.js
-// Graphtect SMTP + Sheets sender (full, final)
+// Graphtect SMTP + Google Sheets + TemplateURL + Open Pixel (final)
 
 const express = require('express');
 const nodemailer = require('nodemailer');
@@ -32,10 +32,7 @@ const transporter = nodemailer.createTransport({
   secure: smtpSecure,                   // true for 465, false for 587 (STARTTLS)
   requireTLS: !smtpSecure,              // force STARTTLS on 587
   authMethod: SMTP_AUTH_METHOD,         // LOGIN or PLAIN
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
+  auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
   tls: { minVersion: 'TLSv1.2', rejectUnauthorized: true },
   logger: true,                         // turn off later if noisy
   debug: true,
@@ -64,6 +61,24 @@ function renderTemplate(str, data = {}) {
   return str.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_, k) =>
     (data[k] !== undefined && data[k] !== null) ? String(data[k]) : ''
   );
+}
+
+// Load template from: inline html -> templateURL (HTTP/HTTPS) -> local file
+async function resolveTemplate({ html, templateURL }) {
+  if (html && typeof html === 'string' && html.trim()) return html;
+
+  if (templateURL && /^https?:\/\//i.test(templateURL)) {
+    try {
+      // Node 18+ has global fetch
+      const r = await fetch(templateURL, { cache: 'no-store' });
+      if (!r.ok) throw new Error(`fetch ${r.status}`);
+      const txt = await r.text();
+      if (txt && txt.trim()) return txt;
+    } catch (e) {
+      console.log('templateURL fetch failed:', e.message);
+    }
+  }
+  return loadTemplateFile();
 }
 
 /* ------------------------------------------------------------------ */
@@ -112,7 +127,7 @@ async function markStatus(email, status, reason = '') {
   }
 }
 
-// When pixel fires you could call this (hook from px route if you have one)
+// Mark open when pixel fires
 async function markOpen(email, campaignId = '') {
   try {
     const sheets = await getSheetsClient();
@@ -182,6 +197,36 @@ async function buildRecipientsFromSheet({
     __row: r.__row
   }));
 }
+
+/* ------------------------------------------------------------------ */
+/* Open-tracking pixel                                                */
+/* ------------------------------------------------------------------ */
+
+const ONE_BY_ONE_GIF = Buffer.from(
+  'R0lGODlhAQABAPAAAAAAAAAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==',
+  'base64'
+);
+
+app.get('/px', async (req, res) => {
+  try {
+    const email = String(req.query.email || '').trim();
+    const campaignId = String(req.query.id || '').trim();
+    if (email) {
+      await markOpen(email, campaignId);
+    }
+  } catch (e) {
+    // swallow; always return the pixel
+  } finally {
+    res.set({
+      'Content-Type': 'image/gif',
+      'Content-Length': ONE_BY_ONE_GIF.length,
+      'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+      'Pragma': 'no-cache',
+      'Expires': '0'
+    });
+    res.status(200).send(ONE_BY_ONE_GIF);
+  }
+});
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                            */
@@ -300,22 +345,20 @@ app.post('/send-batch', async (req, res) => {
       from = process.env.SMTP_USER,
       replyTo,
       subject = SUBJECT_TEMPLATE,
-      html,                                // if not provided, will use file
+      html,                 // inline HTML (optional)
+      templateURL,          // URL to template (optional)
       text = '',
       recipients = [],
       batchDelayMs = 800,
       maxRetries = 2,
     } = req.body || {};
 
-    if (!html && !fs.existsSync(TEMPLATE_FILE)) {
-      return res.status(400).json({ ok: false, error: 'missing_html_and_template_file' });
-    }
     if (!Array.isArray(recipients) || recipients.length === 0)
       return res.status(400).json({ ok: false, error: 'no_recipients' });
     if (String(from).trim().toLowerCase() !== String(process.env.SMTP_USER || '').trim().toLowerCase())
       return res.status(400).json({ ok: false, error: 'from_must_equal_smtp_user' });
 
-    const htmlSource = html || loadTemplateFile();
+    const htmlSource = await resolveTemplate({ html, templateURL });
 
     const results = [];
     for (const r of recipients) {
@@ -370,6 +413,7 @@ app.post('/send-from-sheet', async (req, res) => {
     const {
       subject,
       html,
+      templateURL,                 // NEW: prefer URL if provided
       text,
       batchDelayMs   = 1200,
       maxRetries     = 2,
@@ -382,7 +426,7 @@ app.post('/send-from-sheet', async (req, res) => {
 
     if (!subject && !SUBJECT_TEMPLATE) return res.status(400).json({ ok: false, error: 'missing_subject' });
 
-    const htmlSource   = html || loadTemplateFile();
+    const htmlSource   = await resolveTemplate({ html, templateURL });
     const finalSubject = subject || SUBJECT_TEMPLATE;
 
     if (!htmlSource) return res.status(500).json({ ok: false, error: 'template_missing' });
@@ -430,12 +474,12 @@ app.post('/send-daily', async (req, res) => {
       startRow       = 2,
       from           = process.env.SMTP_USER,
       replyTo        = process.env.SMTP_USER,
-      subject
+      subject,
+      templateURL,
     } = req.body || {};
 
-    const htmlSource   = loadTemplateFile();
+    const htmlSource   = await resolveTemplate({ html: null, templateURL }); // prefer URL in automation
     const finalSubject = subject || SUBJECT_TEMPLATE;
-
     if (!htmlSource) return res.status(500).json({ ok: false, error: 'template_missing' });
 
     const recipients = await buildRecipientsFromSheet({ onlyIfStatusIn, startRow, maxRows });
