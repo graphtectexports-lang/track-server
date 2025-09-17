@@ -1,8 +1,7 @@
-// server.js  — Hostinger SMTP + Google Sheets + Pixel Tracking
-// ------------------------------------------------------------
+// server.js  — Hostinger SMTP + Google Sheets + Pixel Tracking (isolated under /hostinger)
+// ----------------------------------------------------------------------------------------
 
 const express = require('express');
-const fetch = require('node-fetch'); // only for templateURL fetch (no need if you won't use it)
 const nodemailer = require('nodemailer');
 const { google } = require('googleapis');
 const fs = require('fs');
@@ -34,7 +33,7 @@ const transporter = nodemailer.createTransport({
 
 // ---------- Sheets ----------
 const KEYFILE  = process.env.GOOGLE_APPLICATION_CREDENTIALS || 'sa.json';
-const SHEET_ID = process.env.SHEET_ID || '1jrSeqCGiu44AiIq2WP1a00ly8au0kZp5wxsBLV60OvI';
+const SHEET_ID = process.env.SHEET_ID || process.env.SHEETS_SPREADSHEET_ID || '1jrSeqCGiu44AiIq2WP1a00ly8au0kZp5wxsBLV60OvI';
 const TAB_NAME = process.env.TAB_NAME || 'VOLZA 6K FREE';
 
 async function sheetsClient() {
@@ -148,6 +147,7 @@ function applyTemplate(str, data = {}) {
 async function loadTemplate({ html, templateURL, filePath }) {
   if (html) return html;
   if (templateURL) {
+    // Node 18+: global fetch available
     const resp = await fetch(templateURL);
     if (!resp.ok) throw new Error(`templateURL fetch failed: ${resp.status}`);
     return await resp.text();
@@ -190,7 +190,7 @@ async function sendOne({ from, replyTo, subject, html, text }, recipient, { maxR
 }
 
 // ---------- Debug ----------
-app.get('/env-check', async (req, res) => {
+app.get('/hostinger/env-check', async (req, res) => {
   const mask = s => (s ? s.replace(/.(?=.{3})/g, '*') : null);
   res.json({
     SMTP_HOST: process.env.SMTP_HOST || null,
@@ -202,7 +202,7 @@ app.get('/env-check', async (req, res) => {
   });
 });
 
-app.get('/smtp-check', async (req, res) => {
+app.get('/hostinger/smtp-check', async (req, res) => {
   try { await transporter.verify(); res.json({ ok: true }); }
   catch (e) { res.json({ ok: false, error: String(e) }); }
 });
@@ -218,30 +218,28 @@ function guard(path) {
     return res.status(401).json({ ok: false, error: 'unauthorized' });
   });
 }
-guard('/send-from-sheet');
+guard('/hostinger/sheet-preview');
+guard('/hostinger/send-from-sheet');
 
 // ---------- Pixel (open tracking) ----------
-// <img src="https://YOUR_SERVER/px?email={{email}}&id=catalogue-2025" ... />
-app.get('/px', async (req, res) => {
+// <img src="https://YOUR_SERVER/hostinger/px?email={{email}}&id=hostinger-2025" ... />
+app.get('/hostinger/px', async (req, res) => {
   const email = String(req.query.email || '').trim();
   const id    = String(req.query.id || '').trim(); // optional label
   if (email) markOpen(email, id).catch(()=>{});
   // Return a 1x1 transparent GIF
-  const buf = Buffer.from(
-    'R0lGODlhAQABAPAAAP///wAAACwAAAAAAQABAAACAkQBADs=', 'base64'
-  );
+  const buf = Buffer.from('R0lGODlhAQABAPAAAP///wAAACwAAAAAAQABAAACAkQBADs=', 'base64');
   res.set('Content-Type', 'image/gif');
   res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
   return res.status(200).send(buf);
 });
 
 // ---------- Preview ----------
-app.get('/sheet-preview', async (req, res) => {
+app.get('/hostinger/sheet-preview', async (req, res) => {
   try {
     const startRow = Number(req.query.startRow || 2);
     const maxRows  = Number(req.query.maxRows  || 50);
-    const onlyIfStatusIn =
-      (req.query.onlyIfStatusIn ?? ',').split(',').map(s => s.trim());
+    const onlyIfStatusIn = (req.query.onlyIfStatusIn ?? ',').split(',').map(s => s.trim());
     const recipients = await buildRecipientsFromSheet({ onlyIfStatusIn, startRow, maxRows });
     res.json({ ok: true, count: recipients.length, sample: recipients.slice(0, 10) });
   } catch (e) {
@@ -250,7 +248,7 @@ app.get('/sheet-preview', async (req, res) => {
 });
 
 // ---------- Send from Sheet (Hostinger SMTP) ----------
-app.post('/send-from-sheet', async (req, res) => {
+app.post('/hostinger/send-from-sheet', async (req, res) => {
   try {
     const {
       subject = process.env.EMAIL_SUBJECT || 'Graphtect Catalogue 2025',
@@ -258,7 +256,7 @@ app.post('/send-from-sheet', async (req, res) => {
       batchDelayMs   = Number(process.env.BATCH_DELAY_MS || 1500),
       maxRetries     = 1,
       startRow       = 2,
-      maxRows        = 300, // keep under Hostinger 1000/day; cron controls the pace
+      maxRows        = 300, // keep under Hostinger daily cap; cron controls timing
       onlyIfStatusIn = ['', 'Failed'],
       from           = process.env.SMTP_USER,
       replyTo,
