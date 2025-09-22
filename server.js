@@ -5,6 +5,7 @@ const express = require('express');
 const nodemailer = require('nodemailer');
 const { google } = require('googleapis');
 const fs = require('fs');
+const crypto = require('crypto'); // NEW: for per-send UUID
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -157,13 +158,25 @@ async function loadTemplate({ html, templateURL, filePath }) {
   throw new Error('No HTML template available (html/templateURL/file not found).');
 }
 
-async function sendOne({ from, replyTo, subject, html, text }, recipient, { maxRetries = 1, delayOnSuccessMs = 1200 } = {}) {
+// ---------- SEND ONE (patched with send_id + cacheBuster) ----------
+async function sendOne(
+  { from, replyTo, subject, html, text },
+  recipient,
+  { maxRetries = 1, delayOnSuccessMs = 1200 } = {}
+) {
   const to = recipient.email;
   if (!isEmail(to)) return { to, ok: false, error: 'invalid_email' };
 
-  const htmlRendered = applyTemplate(html, { ...recipient, email: to });
-  const textRendered = text ? applyTemplate(text, { ...recipient, email: to }) : undefined;
-  const subjectRendered = applyTemplate(subject, { ...recipient, email: to });
+  // per-send identifiers for tracking/pixel
+  const sendId = crypto.randomUUID();  // {{send_id}}
+  const cacheBuster = Date.now();      // {{cacheBuster}}
+
+  // placeholders available to template
+  const ctx = { ...recipient, email: to, send_id: sendId, cacheBuster };
+
+  const htmlRendered    = applyTemplate(html, ctx);
+  const textRendered    = text ? applyTemplate(text, ctx) : undefined;
+  const subjectRendered = applyTemplate(subject, ctx);
 
   const msg = {
     from, to,
@@ -178,7 +191,7 @@ async function sendOne({ from, replyTo, subject, html, text }, recipient, { maxR
     try {
       const info = await transporter.sendMail(msg);
       if (delayOnSuccessMs) await sleep(delayOnSuccessMs);
-      return { to, ok: true, messageId: info.messageId, response: info.response };
+      return { to, ok: true, messageId: info.messageId, response: info.response, sendId };
     } catch (err) {
       lastErr = err?.message || String(err);
       attempt += 1;
