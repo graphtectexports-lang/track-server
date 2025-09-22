@@ -222,16 +222,29 @@ guard('/hostinger/sheet-preview');
 guard('/hostinger/send-from-sheet');
 
 // ---------- Pixel (open tracking) ----------
+function sendPixel(res) {
+  const buf = Buffer.from('R0lGODlhAQABAPAAAP///wAAACwAAAAAAQABAAACAkQBADs=', 'base64'); // 1x1 transparent GIF
+  res.set('Content-Type', 'image/gif');
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  return res.status(200).send(buf);
+}
+
+// Existing pixel under /hostinger/px
 // <img src="https://YOUR_SERVER/hostinger/px?email={{email}}&id=hostinger-2025" ... />
 app.get('/hostinger/px', async (req, res) => {
   const email = String(req.query.email || '').trim();
   const id    = String(req.query.id || '').trim(); // optional label
   if (email) markOpen(email, id).catch(()=>{});
-  // Return a 1x1 transparent GIF
-  const buf = Buffer.from('R0lGODlhAQABAPAAAP///wAAACwAAAAAAQABAAACAkQBADs=', 'base64');
-  res.set('Content-Type', 'image/gif');
-  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-  return res.status(200).send(buf);
+  return sendPixel(res);
+});
+
+// NEW alias at /px (recommended simpler URL)
+// <img src="https://YOUR_SERVER/px?email={{email}}&id={{send_id}}&cb={{cacheBuster}}" ... />
+app.get('/px', async (req, res) => {
+  const email = String(req.query.email || '').trim();
+  const id    = String(req.query.id || '').trim(); // optional label
+  if (email) markOpen(email, id).catch(()=>{});
+  return sendPixel(res);
 });
 
 // ---------- Preview ----------
