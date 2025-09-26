@@ -5,7 +5,7 @@ const express = require('express');
 const nodemailer = require('nodemailer');
 const { google } = require('googleapis');
 const fs = require('fs');
-const crypto = require('crypto'); // NEW: for per-send UUID
+const crypto = require('crypto'); // per-send UUIDs
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -18,19 +18,43 @@ app.get('/healthz', (_, res) => res.json({ ok: true }));
 
 // ---------- SMTP (Hostinger) ----------
 const toBool = v => /^(true|1|yes)$/i.test(String(v || ''));
-const smtpPort   = Number(process.env.SMTP_PORT || 587);
-const smtpSecure = toBool(process.env.SMTP_SECURE || 'false'); // true for 465, false for 587
-const SMTP_AUTH_METHOD = (process.env.SMTP_AUTH_METHOD || 'LOGIN').toUpperCase();
+
+const smtpPort          = Number(process.env.SMTP_PORT || 587);
+const smtpSecure        = toBool(process.env.SMTP_SECURE || 'false'); // true for 465, false for 587
+const SMTP_AUTH_METHOD  = (process.env.SMTP_AUTH_METHOD || 'LOGIN').toUpperCase();
+const SMTP_FAMILY       = Number(process.env.SMTP_FAMILY || 0);       // 0/blank = auto, 4 = IPv4, 6 = IPv6
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST, // e.g. smtp.hostinger.com
   port: smtpPort,
-  secure: smtpSecure,
+  secure: smtpSecure,          // SMTPS (465) if true; STARTTLS (587) if false
   requireTLS: !smtpSecure,
   authMethod: SMTP_AUTH_METHOD,
   auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
   tls: { minVersion: 'TLSv1.2', rejectUnauthorized: true },
+  family: SMTP_FAMILY || undefined, // 👈 force IPv4/IPv6 if provided
+  connectionTimeout: Number(process.env.SMTP_CONN_TIMEOUT || 30000),
+  greetingTimeout:   Number(process.env.SMTP_GREET_TIMEOUT || 20000),
+  socketTimeout:     Number(process.env.SMTP_SOCKET_TIMEOUT || 60000),
 });
+
+// small startup log (masked)
+(function startupLog() {
+  const mask = s => (s ? s.replace(/.(?=.{3})/g, '*') : null);
+  console.log('[SMTP]',
+    JSON.stringify({
+      host: process.env.SMTP_HOST || null,
+      port: smtpPort,
+      secure: smtpSecure,
+      authMethod: SMTP_AUTH_METHOD,
+      family: SMTP_FAMILY || 'auto',
+      user: mask(process.env.SMTP_USER || null),
+      connTO: Number(process.env.SMTP_CONN_TIMEOUT || 30000),
+      greetTO: Number(process.env.SMTP_GREET_TIMEOUT || 20000),
+      sockTO: Number(process.env.SMTP_SOCKET_TIMEOUT || 60000),
+    })
+  );
+})();
 
 // ---------- Sheets ----------
 const KEYFILE  = process.env.GOOGLE_APPLICATION_CREDENTIALS || 'sa.json';
@@ -148,7 +172,6 @@ function applyTemplate(str, data = {}) {
 async function loadTemplate({ html, templateURL, filePath }) {
   if (html) return html;
   if (templateURL) {
-    // Node 18+: global fetch available
     const resp = await fetch(templateURL);
     if (!resp.ok) throw new Error(`templateURL fetch failed: ${resp.status}`);
     return await resp.text();
@@ -158,7 +181,7 @@ async function loadTemplate({ html, templateURL, filePath }) {
   throw new Error('No HTML template available (html/templateURL/file not found).');
 }
 
-// ---------- SEND ONE (patched with send_id + cacheBuster) ----------
+// ---------- SEND ONE (with send_id + cacheBuster) ----------
 async function sendOne(
   { from, replyTo, subject, html, text },
   recipient,
@@ -167,11 +190,8 @@ async function sendOne(
   const to = recipient.email;
   if (!isEmail(to)) return { to, ok: false, error: 'invalid_email' };
 
-  // per-send identifiers for tracking/pixel
   const sendId = crypto.randomUUID();  // {{send_id}}
   const cacheBuster = Date.now();      // {{cacheBuster}}
-
-  // placeholders available to template
   const ctx = { ...recipient, email: to, send_id: sendId, cacheBuster };
 
   const htmlRendered    = applyTemplate(html, ctx);
@@ -209,6 +229,7 @@ app.get('/hostinger/env-check', async (req, res) => {
     SMTP_HOST: process.env.SMTP_HOST || null,
     SMTP_PORT: smtpPort,
     SMTP_SECURE: smtpSecure,
+    SMTP_FAMILY: SMTP_FAMILY || 'auto',
     SMTP_USER: mask(process.env.SMTP_USER || null),
     SHEET_ID, TAB_NAME,
     KEYFILE_IN_USE: KEYFILE,
@@ -255,7 +276,7 @@ app.get('/hostinger/px', async (req, res) => {
 // <img src="https://YOUR_SERVER/px?email={{email}}&id={{send_id}}&cb={{cacheBuster}}" ... />
 app.get('/px', async (req, res) => {
   const email = String(req.query.email || '').trim();
-  const id    = String(req.query.id || '').trim(); // optional label
+  const id    = String(req.query.id || '').trim();
   if (email) markOpen(email, id).catch(()=>{});
   return sendPixel(res);
 });
